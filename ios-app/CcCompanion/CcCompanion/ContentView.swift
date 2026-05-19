@@ -65,7 +65,8 @@ struct ContentView: View {
         return [
             .init(id: 0, title: "聊天", systemImage: "bubble.left.and.bubble.right"),
             .init(id: 1, title: "终端", systemImage: "terminal"),
-            .init(id: 2, title: "设置", systemImage: "gearshape.fill"),
+            .init(id: 2, title: "群聊", systemImage: "person.3"),
+            .init(id: 3, title: "设置", systemImage: "gearshape.fill"),
         ]
     }
 
@@ -76,7 +77,8 @@ struct ContentView: View {
                 switch selectedTab {
                 case 0: NavigationStack { ChatView(onShowFavorites: { showFavorites = true }, scrollToken: chatScrollToken) }
                 case 1: NavigationStack { TerminalView() }
-                case 2: NavigationStack { CcSettingsView() }
+                case 2: NavigationStack { GroupChatView() }
+                case 3: NavigationStack { CcSettingsView() }
                 default: NavigationStack { ChatView(onShowFavorites: { showFavorites = true }, scrollToken: chatScrollToken) }
                 }
             }
