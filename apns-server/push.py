@@ -731,7 +731,8 @@ class PushHandler(BaseHTTPRequestHandler):
         return self._require_auth()
 
     def _is_public_get(self) -> bool:
-        return self.path in {"/health", "/version"}
+        p = self.path.split("?")[0]
+        return p in {"/health", "/version", "/web/chat", "/web/group"}
 
     def _check_ip_allowed(self) -> bool:
         allowed = self.state.allowed_ips
