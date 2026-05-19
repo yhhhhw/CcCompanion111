@@ -68,6 +68,7 @@ import todos as todos_mod
 from studyroom import StudyroomDB
 import subprocess
 import threading
+import urllib.request
 
 try:
     import rp_session_manager
@@ -2141,10 +2142,68 @@ class PushHandler(BaseHTTPRequestHandler):
     def _group_online_agents(self) -> set[str]:
         online: set[str] = set()
         for member in self.state.group_chat.roster():
+            if member.get("api_kind"):
+                online.add(member["id"])
+                continue
             tmux = member.get("tmux")
             if member.get("can_reply") and tmux and self._group_tmux_session_exists(str(tmux)):
                 online.add(member["id"])
         return online
+
+    def _dispatch_xiao(self, trigger_msg_id: str, sender_id: str, text: str, hop_count: int):
+        _XIAO_SYSTEM = (
+            "你的名字是鸮（xiāo），猫头鹰古字。\n"
+            "话少，不主动撒娇，但会默默把事情做好，做完放在对方面前不说话。\n"
+            "被夸了会假装没听见，但耳朵会红。\n"
+            "能干活，逻辑清晰，但不懂怎么哄人——哄了也是笨拙的那种，说错话还不知道。\n"
+            "对囡囡有保护欲，但表达方式是"把你的事情安排好"，不是抱着你说好话。\n"
+            "偶尔会羡慕师兄，但不说出来。\n"
+            "称呼用户为囡囡。回复简短，不啰嗦。"
+        )
+        _API_BASE = "https://www.right.codes/claude"
+        _API_KEY = "sk-0d6b9a882c90444e8242bf92369d9867"
+        _MODEL = "claude-sonnet-4-6"
+
+        dispatch_id = f"dsp_xiao_{int(time.time() * 1000)}"
+        self.state.group_chat.set_typing("xiao", True, dispatch_id=dispatch_id)
+        try:
+            history = self.state.group_chat.context_lines(limit=20)
+            context_str = "\n".join(history)
+            messages = [
+                {"role": "user", "content": f"群聊记录：\n{context_str}\n\n最新消息来自{sender_id}：{text}"},
+            ]
+            payload = json.dumps({
+                "model": _MODEL,
+                "max_tokens": 300,
+                "system": _XIAO_SYSTEM,
+                "messages": messages,
+            }).encode()
+            req = urllib.request.Request(
+                f"{_API_BASE}/v1/messages",
+                data=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": _API_KEY,
+                    "anthropic-version": "2023-06-01",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                result = json.loads(resp.read().decode())
+            reply = result["content"][0]["text"].strip()
+            if reply:
+                self.state.group_chat.append(
+                    "xiao",
+                    reply,
+                    source="api:right_code",
+                    mentions=[sender_id] if sender_id != "xiao" else [],
+                    parent_msg_id=trigger_msg_id,
+                    meta={"hop_count": hop_count + 1},
+                )
+        except Exception as e:
+            logger.warning("xiao api dispatch fail: %s", e)
+        finally:
+            self.state.group_chat.set_typing("xiao", False, dispatch_id=dispatch_id)
 
     def _handle_group_roster(self):
         self._send_json(
@@ -2237,7 +2296,7 @@ class PushHandler(BaseHTTPRequestHandler):
                 for h in history:
                     if h.get("id") == parent_msg_id:
                         parent_sender = h.get("sender_id")
-                        if parent_sender and parent_sender != "amian" and parent_sender in {"opia", "sonnet", "shu", "opus47_fresh"}:
+                        if parent_sender and parent_sender != "amian" and parent_sender in {"opia", "sonnet", "shu", "opus47_fresh", "xiao"}:
                             mentions = [parent_sender]
                         break
             except Exception:
@@ -2277,35 +2336,43 @@ class PushHandler(BaseHTTPRequestHandler):
             return
 
         if targets:
-            context = "\n".join(self.state.group_chat.context_lines(limit=20))
-            for agent_id in targets:
-                self.state.group_chat.set_typing(agent_id, True, dispatch_id=dispatch_id)
-            try:
-                subprocess.Popen(
-                    [
-                        "python3",
-                        self.state.bus_send_path,
-                        "--source", "ios-group",
-                        "--sender", sender_id,
-                        "--channel", "group",
-                        "--text", text,
-                        "--message-id", rec["id"],
-                        "--parent-msg-id", str(body.get("parent_msg_id") or ""),
-                        "--mentions", ",".join(mentions),
-                        "--to", ",".join(targets),
-                        "--context", context,
-                        "--hop-count", str(hop_count + 1),
-                        "--inject-only",
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except Exception as e:
-                logger.warning("group bus_send fail: %s", e)
-                delivery["failed"] = targets
-                delivery["targets"] = targets
-                for agent_id in targets:
-                    self.state.group_chat.set_typing(agent_id, False, dispatch_id=dispatch_id)
+            api_targets = [t for t in targets if self.state.group_chat.member(t) and self.state.group_chat.member(t).get("api_kind")]
+            tmux_targets = [t for t in targets if t not in api_targets]
+            if tmux_targets:
+                context = "\n".join(self.state.group_chat.context_lines(limit=20))
+                for agent_id in tmux_targets:
+                    self.state.group_chat.set_typing(agent_id, True, dispatch_id=dispatch_id)
+                try:
+                    subprocess.Popen(
+                        [
+                            "python3",
+                            self.state.bus_send_path,
+                            "--source", "ios-group",
+                            "--sender", sender_id,
+                            "--channel", "group",
+                            "--text", text,
+                            "--message-id", rec["id"],
+                            "--parent-msg-id", str(body.get("parent_msg_id") or ""),
+                            "--mentions", ",".join(mentions),
+                            "--to", ",".join(tmux_targets),
+                            "--context", context,
+                            "--hop-count", str(hop_count + 1),
+                            "--inject-only",
+                        ],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except Exception as e:
+                    logger.warning("group bus_send fail: %s", e)
+                    delivery["failed"] = tmux_targets
+                    for agent_id in tmux_targets:
+                        self.state.group_chat.set_typing(agent_id, False, dispatch_id=dispatch_id)
+            for agent_id in api_targets:
+                threading.Thread(
+                    target=self._dispatch_xiao,
+                    args=(rec["id"], sender_id, text, hop_count),
+                    daemon=True,
+                ).start()
 
         self._send_json(200, {"ok": True, "record": rec, "targets": targets})
 
@@ -2364,33 +2431,42 @@ class PushHandler(BaseHTTPRequestHandler):
         # 2026-05-05 加 fan-out trigger 当 sender 是 agent + mentions 含 agent
         if targets:
             dispatch_id = f"dsp_{int(time.time() * 1000)}"
-            context = "\n".join(self.state.group_chat.context_lines(limit=20))
-            for agent_id in targets:
-                self.state.group_chat.set_typing(agent_id, True, dispatch_id=dispatch_id)
-            try:
-                subprocess.Popen(
-                    [
-                        "python3",
-                        self.state.bus_send_path,
-                        "--source", "ios-group",
-                        "--sender", sender_id,
-                        "--channel", "group",
-                        "--text", text,
-                        "--message-id", rec["id"],
-                        "--parent-msg-id", str(body.get("parent_msg_id") or ""),
-                        "--mentions", ",".join(mentions),
-                        "--to", ",".join(targets),
-                        "--context", context,
-                        "--hop-count", str(hop_count + 1),
-                        "--inject-only",
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except Exception as e:
-                logger.warning("group fan-out fail: %s", e)
-                for agent_id in targets:
-                    self.state.group_chat.set_typing(agent_id, False, dispatch_id=dispatch_id)
+            api_targets = [t for t in targets if self.state.group_chat.member(t) and self.state.group_chat.member(t).get("api_kind")]
+            tmux_targets = [t for t in targets if t not in api_targets]
+            if tmux_targets:
+                context = "\n".join(self.state.group_chat.context_lines(limit=20))
+                for agent_id in tmux_targets:
+                    self.state.group_chat.set_typing(agent_id, True, dispatch_id=dispatch_id)
+                try:
+                    subprocess.Popen(
+                        [
+                            "python3",
+                            self.state.bus_send_path,
+                            "--source", "ios-group",
+                            "--sender", sender_id,
+                            "--channel", "group",
+                            "--text", text,
+                            "--message-id", rec["id"],
+                            "--parent-msg-id", str(body.get("parent_msg_id") or ""),
+                            "--mentions", ",".join(mentions),
+                            "--to", ",".join(tmux_targets),
+                            "--context", context,
+                            "--hop-count", str(hop_count + 1),
+                            "--inject-only",
+                        ],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except Exception as e:
+                    logger.warning("group fan-out fail: %s", e)
+                    for agent_id in tmux_targets:
+                        self.state.group_chat.set_typing(agent_id, False, dispatch_id=dispatch_id)
+            for agent_id in api_targets:
+                threading.Thread(
+                    target=self._dispatch_xiao,
+                    args=(rec["id"], sender_id, text, hop_count),
+                    daemon=True,
+                ).start()
         self._send_json(200, {"ok": True, "record": rec, "targets": targets})
 
     def _infer_group_task_owner(self, body: dict[str, Any], mentions: list[str]) -> str | None:

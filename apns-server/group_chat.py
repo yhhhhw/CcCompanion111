@@ -64,6 +64,17 @@ ROSTER: list[dict[str, Any]] = [
         "can_reply": True,
         "optional": True,
     },
+    {
+        "id": "xiao",
+        "display_name": "鸮",
+        "kind": "agent",
+        "avatar": "鸮",
+        "color": "indigo",
+        "model": "claude-sonnet-4-6",
+        "tmux": None,
+        "can_reply": True,
+        "api_kind": "right_code",
+    },
 ]
 
 
@@ -103,6 +114,9 @@ MENTION_ALIASES = {
     "opus47": "opus47_fresh",
     "opus47-fresh": "opus47_fresh",
     "opus47_fresh": "opus47_fresh",
+    "鸮": "xiao",
+    "xiao": "xiao",
+    "xiāo": "xiao",
 }
 
 
