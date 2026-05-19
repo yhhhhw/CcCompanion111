@@ -253,6 +253,219 @@ WEB_CHAT_HTML = r"""<!DOCTYPE html>
 </html>
 """
 
+WEB_GROUP_HTML = r"""<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>群聊</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body { background: #1a1a1a; color: #eee; font: 14px -apple-system, "PingFang SC", system-ui, sans-serif; display: flex; flex-direction: column; }
+  header { padding: 8px 14px; background: #111; border-bottom: 1px solid #2a2a2a; display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+  header .title { font-weight: 600; font-size: 15px; }
+  header .status { color: #888; font-size: 12px; margin-left: auto; }
+  #roster { display: flex; gap: 6px; padding: 8px 14px; background: #111; border-bottom: 1px solid #2a2a2a; overflow-x: auto; flex-shrink: 0; }
+  .member { display: flex; flex-direction: column; align-items: center; gap: 3px; cursor: default; min-width: 44px; }
+  .member .av { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; position: relative; }
+  .member .av.offline { opacity: .4; }
+  .member .av.typing::after { content: ''; position: absolute; bottom: 0; right: 0; width: 10px; height: 10px; border-radius: 50%; background: #5cff7e; border: 2px solid #111; animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.3); } }
+  .member .name { font-size: 10px; color: #888; white-space: nowrap; }
+  #log { flex: 1; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { display: flex; gap: 8px; max-width: 90%; }
+  .msg.self { flex-direction: row-reverse; margin-left: auto; }
+  .msg .av { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; flex-shrink: 0; margin-top: 2px; }
+  .msg .body { display: flex; flex-direction: column; gap: 3px; }
+  .msg.self .body { align-items: flex-end; }
+  .msg .sender { font-size: 11px; color: #888; }
+  .bubble { padding: 8px 11px; border-radius: 10px; word-wrap: break-word; white-space: pre-wrap; line-height: 1.5; font-size: 14px; }
+  .msg.self .bubble { background: #d96d36; color: #fff; border-radius: 10px 2px 10px 10px; }
+  .msg:not(.self) .bubble { background: #2a2a2a; color: #eee; border-radius: 2px 10px 10px 10px; }
+  .msg .ts { font-size: 10px; color: #555; }
+  .bubble .mention { color: #7eb8ff; font-weight: 600; }
+  #footer { padding: 8px 10px; background: #111; border-top: 1px solid #2a2a2a; display: flex; gap: 8px; flex-shrink: 0; }
+  textarea { flex: 1; background: #1e1e1e; color: #eee; border: 1px solid #333; border-radius: 8px; padding: 8px; font: inherit; resize: none; min-height: 38px; max-height: 100px; }
+  textarea:focus { outline: none; border-color: #555; }
+  button { background: #d96d36; color: #fff; border: 0; border-radius: 8px; padding: 0 16px; font: inherit; cursor: pointer; white-space: nowrap; }
+  button:disabled { opacity: .4; cursor: default; }
+  .av-orange { background: #e07b3a; }
+  .av-blue   { background: #3a7be0; }
+  .av-green  { background: #3aae6a; }
+  .av-purple { background: #8a3ae0; }
+  .av-indigo { background: #5b4fcf; }
+  .av-neutral{ background: #666; }
+</style>
+</head>
+<body>
+<header>
+  <span class="title">群聊</span>
+  <span class="status" id="status">加载中...</span>
+</header>
+<div id="roster"></div>
+<main id="log"></main>
+<div id="footer">
+  <textarea id="input" placeholder="发消息… @鸮 @opia @sonnet (Cmd+Enter)" rows="1"></textarea>
+  <button id="send">发送</button>
+</div>
+<script>
+  const ROSTER_COLORS = {orange:'av-orange',blue:'av-blue',green:'av-green',purple:'av-purple',indigo:'av-indigo',neutral:'av-neutral'};
+  let AUTH_TOKEN = '';
+  let roster = [];
+  let rosterById = {};
+  let lastTs = null;
+  let seenIds = new Set();
+  let firstLoad = true;
+
+  function authHeaders(extra) {
+    return AUTH_TOKEN ? { 'X-Auth-Token': AUTH_TOKEN, ...extra } : { ...extra };
+  }
+
+  function fmtTime(ts) {
+    if (!ts) return '';
+    try { const d = new Date(ts); return String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0'); }
+    catch { return ts.slice(11,16); }
+  }
+
+  function highlightMentions(text) {
+    return text.replace(/@([A-Za-z0-9_\-一-鿿]+)/g, '<span class="mention">@$1</span>');
+  }
+
+  function buildAvEl(member) {
+    const el = document.createElement('div');
+    const color = ROSTER_COLORS[member.color] || 'av-neutral';
+    el.className = 'av ' + color;
+    el.textContent = (member.avatar || member.display_name || member.id).slice(0,2);
+    el.id = 'av-' + member.id;
+    return el;
+  }
+
+  function renderRoster(members, statusMap) {
+    roster = members;
+    rosterById = {};
+    members.forEach(m => rosterById[m.id] = m);
+    const el = document.getElementById('roster');
+    el.innerHTML = '';
+    members.forEach(m => {
+      const s = statusMap[m.id] || {};
+      const wrap = document.createElement('div');
+      wrap.className = 'member';
+      wrap.id = 'member-' + m.id;
+      const av = buildAvEl(m);
+      if (s.state !== 'online' && m.kind === 'agent') av.classList.add('offline');
+      if (s.is_typing) av.classList.add('typing');
+      const name = document.createElement('div');
+      name.className = 'name';
+      name.textContent = m.display_name || m.id;
+      wrap.appendChild(av); wrap.appendChild(name);
+      el.appendChild(wrap);
+    });
+  }
+
+  function updateStatus(statusMap) {
+    Object.entries(statusMap).forEach(([id, s]) => {
+      const av = document.getElementById('av-' + id);
+      if (!av) return;
+      av.classList.toggle('offline', s.state !== 'online');
+      av.classList.toggle('typing', !!s.is_typing);
+    });
+  }
+
+  function renderMsg(r) {
+    const key = r.id || (r.ts + '|' + r.sender_id + '|' + (r.text||'').slice(0,32));
+    if (seenIds.has(key)) return;
+    seenIds.add(key);
+    const member = rosterById[r.sender_id] || {id: r.sender_id, display_name: r.sender_id, avatar: r.sender_id.slice(0,2), color: 'neutral'};
+    const isSelf = r.sender_id === 'amian';
+    const wrap = document.createElement('div');
+    wrap.className = 'msg' + (isSelf ? ' self' : '');
+    const av = buildAvEl(member);
+    const body = document.createElement('div');
+    body.className = 'body';
+    if (!isSelf) {
+      const sender = document.createElement('div');
+      sender.className = 'sender';
+      sender.textContent = member.display_name || r.sender_id;
+      body.appendChild(sender);
+    }
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.innerHTML = highlightMentions((r.text || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'));
+    const ts = document.createElement('div');
+    ts.className = 'ts';
+    ts.textContent = fmtTime(r.ts);
+    body.appendChild(bubble); body.appendChild(ts);
+    wrap.appendChild(av); wrap.appendChild(body);
+    document.getElementById('log').appendChild(wrap);
+  }
+
+  async function loadRoster() {
+    try {
+      const res = await fetch('/group/roster', { headers: authHeaders({}) });
+      const data = await res.json();
+      if (data.ok) renderRoster(data.roster, data.status?.agents || {});
+    } catch {}
+  }
+
+  async function poll() {
+    try {
+      const url = lastTs ? '/group/history?since=' + encodeURIComponent(lastTs) + '&limit=50' : '/group/history?limit=60';
+      const res = await fetch(url, { headers: authHeaders({}) });
+      const data = await res.json();
+      if (data.ok && Array.isArray(data.records)) {
+        if (firstLoad) { document.getElementById('log').innerHTML = ''; firstLoad = false; }
+        for (const r of data.records) {
+          renderMsg(r);
+          if (r.ts && (!lastTs || r.ts > lastTs)) lastTs = r.ts;
+        }
+        if (data.records.length) {
+          const log = document.getElementById('log');
+          log.scrollTop = log.scrollHeight;
+        }
+        if (data.status?.agents) updateStatus(data.status.agents);
+        document.getElementById('status').textContent = lastTs ? fmtTime(lastTs) : '在线';
+      }
+    } catch {
+      document.getElementById('status').textContent = '断线 重试中';
+    }
+  }
+
+  async function send() {
+    const text = document.getElementById('input').value.trim();
+    if (!text) return;
+    const btn = document.getElementById('send');
+    btn.disabled = true;
+    try {
+      const res = await fetch('/group/send', {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ text, sender_id: 'amian' }),
+      });
+      if (res.ok) {
+        document.getElementById('input').value = '';
+        await poll();
+      } else {
+        alert('发送失败 ' + res.status);
+      }
+    } catch (e) { alert('网络出错 ' + e); }
+    finally { btn.disabled = false; document.getElementById('input').focus(); }
+  }
+
+  document.getElementById('send').addEventListener('click', send);
+  document.getElementById('input').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); }
+  });
+
+  loadRoster();
+  poll();
+  setInterval(poll, 2500);
+  setInterval(loadRoster, 10000);
+</script>
+</body>
+</html>
+"""
+
 
 class ServerState:
     def __init__(self, config: dict[str, Any], sandbox_override: bool | None = None):
@@ -813,6 +1026,17 @@ class PushHandler(BaseHTTPRequestHandler):
                 self._serve_web_chat(auth_token=None)
             else:
                 self._send_json(401, {"error": "unauthorized — use /web/chat?token=YOUR_SECRET"})
+            return
+        if self.path == "/web/group" or self.path.startswith("/web/group?"):
+            from urllib.parse import urlparse, parse_qs
+            _qs = parse_qs(urlparse(self.path).query)
+            _qt = _qs.get("token", [None])[0]
+            if _qt and self.state.shared_secret and _qt == self.state.shared_secret:
+                self._serve_web_group(auth_token=_qt)
+            elif not self.state.strict_auth or self._auth_matches():
+                self._serve_web_group(auth_token=None)
+            else:
+                self._send_json(401, {"error": "unauthorized — use /web/group?token=YOUR_SECRET"})
             return
         if self.path == "/gomoku/state":
             self._handle_gomoku_state()
@@ -2685,6 +2909,21 @@ class PushHandler(BaseHTTPRequestHandler):
         html = html.replace(
             "headers: { 'Content-Type': 'application/json' },",
             "headers: { 'Content-Type': 'application/json', ...(AUTH_TOKEN ? {'X-Auth-Token': AUTH_TOKEN} : {}) },",
+        )
+        data = html.encode('utf-8')
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _serve_web_group(self, auth_token=None):
+        token_js = json.dumps(auth_token or '')
+        html = WEB_GROUP_HTML.replace(
+            "let AUTH_TOKEN = '';",
+            f"let AUTH_TOKEN = {token_js};",
+            1,
         )
         data = html.encode('utf-8')
         self.send_response(200)
