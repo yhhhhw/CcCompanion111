@@ -3304,6 +3304,44 @@ class PushHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self._send_json(500, {"ok": False, "error": str(e)})
 
+    def _handle_slash_command(self, text: str) -> bool:
+        """处理 / 开头的命令，返回 True 表示已处理。"""
+        cmd = text.strip().lower().split()[0] if text.strip() else ""
+        HELP_TEXT = (
+            "可用命令：\n"
+            "/help — 显示此帮助\n"
+            "/clear — 清空聊天记录\n"
+            "/status — 服务器状态\n"
+            "/session — 当前 tmux session"
+        )
+        if cmd == "/help":
+            reply = HELP_TEXT
+        elif cmd == "/clear":
+            path = self.state.chat.path if hasattr(self.state.chat, "path") else None
+            try:
+                if path and os.path.exists(path):
+                    open(path, "w").close()
+                reply = "聊天记录已清空。"
+            except Exception as e:
+                reply = f"清空失败：{e}"
+        elif cmd == "/status":
+            import time as _time
+            sessions = []
+            try:
+                r = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}"], capture_output=True, text=True, timeout=3)
+                sessions = r.stdout.strip().splitlines()
+            except Exception:
+                pass
+            active = self.state.active_session or self.state.default_session
+            reply = f"服务器正常\n活跃 session：{active}\ntmux sessions：{', '.join(sessions) or '无'}"
+        elif cmd == "/session":
+            reply = f"当前 session：{self.state.active_session or self.state.default_session}"
+        else:
+            reply = f"未知命令 {cmd}\n{HELP_TEXT}"
+        self.state.chat.append(role="assistant", text=reply, source="system")
+        self._send_json(200, {"ok": True, "record": {"role": "assistant", "text": reply}})
+        return True
+
     def _handle_chat_send(self, body: dict[str, Any]):
         """iPhone 发消息进来 → 写 user 条 + 调 bus_send.py 注入主 session"""
         text = body.get("text", "").strip()
@@ -3311,6 +3349,10 @@ class PushHandler(BaseHTTPRequestHandler):
         location = body.get("location") or None
         if not text and not location:
             self._send_json(400, {"error": "text or location required"})
+            return
+        if text and text.startswith("/"):
+            self.state.chat.append(role="user", text=text, source="ios-app")
+            self._handle_slash_command(text)
             return
         # 写 user 历史
         rec = self.state.chat.append(
